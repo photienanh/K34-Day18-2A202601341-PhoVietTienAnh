@@ -2,16 +2,29 @@ from __future__ import annotations
 
 """Production RAG Pipeline — Bài tập NHÓM: ghép M1+M2+M3+M4."""
 
-import os, sys, time
+import os
+import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.m1_chunking import load_documents, chunk_hierarchical
+from config import RERANK_TOP_K
+from src.m1_chunking import chunk_hierarchical, load_documents
 from src.m2_search import HybridSearch
 from src.m3_rerank import CrossEncoderReranker
-from src.m4_eval import load_test_set, evaluate_ragas, failure_analysis, save_report
+from src.m4_eval import evaluate_ragas, failure_analysis, load_test_set, save_report
 from src.m5_enrichment import enrich_chunks
-from config import RERANK_TOP_K
+
+
+def format_context(text: str, metadata: dict) -> str:
+    """Keep provenance visible to both the answer model and RAGAS."""
+    labels = []
+    for key in ("source", "title", "section", "version", "effective_date", "status"):
+        value = metadata.get(key)
+        if value not in (None, ""):
+            labels.append(f"{key}={value}")
+    prefix = f"[{' | '.join(labels)}]\n" if labels else ""
+    return f"{prefix}{text}"
 
 
 def build_pipeline():
@@ -26,7 +39,7 @@ def build_pipeline():
     docs = load_documents()
     all_chunks = []
     for doc in docs:
-        parents, children = chunk_hierarchical(doc["text"], metadata=doc["metadata"])
+        _, children = chunk_hierarchical(doc["text"], metadata=doc["metadata"])
         for child in children:
             all_chunks.append({"text": child.text, "metadata": {**child.metadata, "parent_id": child.parent_id}})
     print(f"  ✓ {len(all_chunks)} chunks from {len(docs)} documents ({time.time()-t0:.1f}s)", flush=True)
@@ -62,7 +75,9 @@ def run_query(query: str, search: HybridSearch, reranker: CrossEncoderReranker) 
     results = search.search(query)
     docs = [{"text": r.text, "score": r.score, "metadata": r.metadata} for r in results]
     reranked = reranker.rerank(query, docs, top_k=RERANK_TOP_K)
-    contexts = [r.text for r in reranked] if reranked else [r.text for r in results[:3]]
+    contexts = ([format_context(r.text, r.metadata) for r in reranked]
+                if reranked else
+                [format_context(r.text, r.metadata) for r in results[:3]])
 
     from config import OPENAI_API_KEY
     if OPENAI_API_KEY and contexts:
@@ -75,7 +90,7 @@ def run_query(query: str, search: HybridSearch, reranker: CrossEncoderReranker) 
                 {"role": "user", "content": f"Context:\n{context_str}\n\nCâu hỏi: {query}"},
             ])
             answer = resp.choices[0].message.content
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - generation failure falls back to context
             print(f"  ⚠️  LLM generation failed: {e}", flush=True)
             answer = contexts[0]
     else:
